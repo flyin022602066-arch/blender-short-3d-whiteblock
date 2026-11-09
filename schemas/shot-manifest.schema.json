@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["project_id", "shot_id", "revision", "source_sha256", "outputs", "upload_permission"],
+  "properties": {
+    "project_id": {"type": "string"},
+    "shot_id": {"type": "string"},
+    "revision": {"type": "integer", "minimum": 1},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "outputs": {"type": "array"},
+    "upload_permission": {"enum": ["offline", "confirmed"]}
+  }
+}

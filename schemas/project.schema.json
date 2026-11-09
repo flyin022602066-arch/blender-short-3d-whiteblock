@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "project_id", "blender_version", "source", "shots"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "project_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"},
+    "blender_version": {"type": "string"},
+    "source": {"type": "object", "required": ["path", "sha256", "readonly"]},
+    "shots": {"type": "array", "minItems": 1}
+  }
+}

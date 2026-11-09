@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "frames", "coordinate_system"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "coordinate_system": {"type": "string"},
+    "frames": {"type": "array", "items": {"type": "object", "required": ["frame", "person_id", "keypoints_2d", "confidence", "occlusion", "model_version"]}}
+  }
+}

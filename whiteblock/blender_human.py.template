@@ -1,0 +1,14 @@
+import sys
+from pathlib import Path
+import bpy
+__SPEC__
+sys.path.insert(0,spec['runtime_root'])
+from whiteblock.blender_human import setup_scene
+bpy.ops.wm.read_factory_settings(use_empty=True)
+scene=setup_scene(spec)
+if spec.get('output_blend'):bpy.ops.wm.save_as_mainfile(filepath=spec['output_blend'])
+if spec.get('output_video'):
+    scene.render.image_settings.file_format='PNG'
+    scene.render.filepath=spec['render_frames']
+    Path(scene.render.filepath).parent.mkdir(parents=True,exist_ok=True)
+    bpy.ops.render.render(animation=True)

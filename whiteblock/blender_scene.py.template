@@ -1,0 +1,280 @@
+# Local editable mannequin scene with perspective camera and ground plane. Depth remains approximate.
+import math
+import os
+import bpy
+from mathutils import Vector, Matrix
+
+__SPEC__
+bpy.ops.wm.read_factory_settings(use_empty=True)
+scene = bpy.context.scene
+scene.frame_start, scene.frame_end = spec['start_frame'], spec['end_frame']
+scene.render.fps = round(spec['fps'])
+scene.render.fps_base = round(spec['fps']) / spec['fps']
+scene.render.resolution_x = spec.get('resolution_x', 640)
+scene.render.resolution_y = spec.get('resolution_y', 360)
+scene.render.resolution_percentage = 100
+scene.render.engine = 'BLENDER_WORKBENCH'
+scene.display.render_aa = '32'
+scene.render.image_settings.file_format = 'PNG'
+scene.render.filepath = spec.get('render_frames', spec.get('output_video', '') + '.frame')
+scene.display.shading.light = 'STUDIO'
+scene.display.shading.color_type = 'MATERIAL'
+scene.display.shading.show_shadows = True
+scene.display.shading.show_cavity = True
+scene.display.shading.cavity_type = 'BOTH'
+scene.display.shading.background_type = 'WORLD'
+scene.world = bpy.data.worlds.new('WhiteblockWorld')
+scene.world.color = (0.13, 0.15, 0.18)
+collections = {}
+for name in spec['collections']:
+    collection = bpy.data.collections.new(name)
+    scene.collection.children.link(collection)
+    collections[name] = collection
+white = collections.get('WHITEBLOCK', scene.collection)
+characters = collections.get('CHARACTERS', white)
+mat = bpy.data.materials.new('Whiteblock')
+mat.diffuse_color = tuple(spec['material']['base_color'])
+mat.roughness = spec['material']['roughness']
+
+
+def move_to(obj, collection):
+    for old in list(obj.users_collection):
+        old.objects.unlink(obj)
+    collection.objects.link(obj)
+
+
+def mesh(name, kind, collection=characters):
+    if kind == 'torso':
+        # Broad shoulders and a tapered waist avoid the detached shoulders of an ellipsoid torso.
+        rings=[(-1,0.65),(-0.85,0.78),(-0.55,0.74),(-0.2,0.76),(0.35,0.9),(0.7,0.98),(0.91,1),(1,0.25)]
+        vertices=[];faces=[];segments=32
+        for z,radius in rings:
+            for i in range(segments):
+                angle=2*math.pi*i/segments
+                vertices.append((radius*math.cos(angle),min(1,radius+0.12)*math.sin(angle),z))
+        for row in range(len(rings)-1):
+            for i in range(segments):
+                a=row*segments+i;b=row*segments+(i+1)%segments
+                faces.append((a,b,b+segments,a+segments))
+        faces.append(tuple(reversed(range(segments))))
+        faces.append(tuple((len(rings)-1)*segments+i for i in range(segments)))
+        data=bpy.data.meshes.new(name+'_Mesh');data.from_pydata(vertices,[],faces);data.update()
+        obj=bpy.data.objects.new(name,data);collection.objects.link(obj)
+    elif kind == 'sphere':
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=16)
+        obj=bpy.context.object
+    else:
+        bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=1, depth=2)
+        obj=bpy.context.object
+    obj.name = name
+    obj.data.materials.append(mat)
+    move_to(obj, collection)
+    for poly in obj.data.polygons:
+        poly.use_smooth = True
+    return obj
+
+
+# Perspective camera with realistic focal length for better depth perception
+res_x = spec.get('resolution_x', 640)
+res_y = spec.get('resolution_y', 360)
+aspect_ratio = res_y / res_x  # For vertical videos like 720x1280, this is >1
+
+# Calculate focal length for natural perspective matching typical smartphone FOV
+# Vertical FOV ~60-70 degrees is common for phone cameras in portrait mode
+sensor_height = 36.0  # Blender's default sensor height in mm
+vertical_fov_deg = 65.0  # Slightly wider than typical to capture full body
+focal_length = sensor_height / (2 * math.tan(math.radians(vertical_fov_deg) / 2))
+
+bpy.ops.object.camera_add(location=(0, -15, 0))
+camera = bpy.context.object
+camera.name = 'CompositionCamera_PERSPECTIVE'
+camera.rotation_euler = (math.pi/2, 0, 0)
+camera.data.type = 'PERSP'
+camera.data.lens = focal_length
+camera.data.sensor_fit = 'VERTICAL'
+camera.data.sensor_height = sensor_height
+scene.camera = camera
+move_to(camera, collections.get('CAMERA_SOLVE', white))
+
+# Calculate view frustum at reference plane (Z=0, where characters stand)
+corners = camera.data.view_frame(scene=scene)
+view_width = max(p.x for p in corners) - min(p.x for p in corners)
+view_height = max(p.y for p in corners) - min(p.y for p in corners)
+
+
+def point(p):
+    # Screen positions are measured; depth estimated from normalized z-coordinate
+    # For perspective camera, we scale depth relative to the view width at Z=0
+    # Typical depth range: camera at Y=-15, characters at Y=0 to Y=8 (forward)
+    depth_scale = view_width * 0.5  # Scale factor for depth variation
+    estimated_depth = p[2] * depth_scale  # Positive Z moves toward camera
+    return Vector(((p[0]-0.5)*view_width,
+                   max(-8, min(8, estimated_depth)),  # Expanded range for perspective
+                   (0.5-p[1])*view_height))
+
+
+# Ground plane for spatial reference and foot contact
+bpy.ops.mesh.primitive_grid_add(x_subdivisions=20, y_subdivisions=20, size=20, location=(0, 0, -1.6))
+ground = bpy.context.object
+ground.name = 'GroundPlane'
+ground_mat = bpy.data.materials.new('GroundMaterial')
+ground_mat.diffuse_color = (0.15, 0.16, 0.18, 1)  # Slightly darker than background
+ground_mat.roughness = 0.9
+ground.data.materials.append(ground_mat)
+move_to(ground, collections.get('PROPS', white))
+ground['kind'] = 'reference_ground'
+
+
+def key(obj, frame, visible, location=None, scale=None, rotation=None):
+    obj.hide_render = obj.hide_viewport = not visible
+    obj.keyframe_insert('hide_render', frame=frame)
+    obj.keyframe_insert('hide_viewport', frame=frame)
+    if visible:
+        obj.location, obj.scale = location, scale
+        obj.keyframe_insert('location', frame=frame)
+        obj.keyframe_insert('scale', frame=frame)
+        if rotation is not None:
+            obj.rotation_mode = 'QUATERNION'
+            obj.rotation_quaternion = rotation
+            obj.keyframe_insert('rotation_quaternion', frame=frame)
+
+
+limbs = [(11,13), (13,15), (12,14), (14,16), (23,25), (25,27), (24,26), (26,28)]
+
+
+def transform(center, scale, rotation=None):
+    return Matrix.LocRotScale(Vector(center), rotation or Vector((0,0,1)).to_track_quat('Z','Y'), Vector(scale))
+
+
+def part_transforms(sample):
+    v={int(j):Vector(p) for j,p in sample['joints'].items()}
+    visible=sample['visibility']
+    w=sample['width']; shoulder=Vector(sample['shoulders']); hip=Vector(sample['hips'])
+    axis=shoulder-hip
+    parts={
+        'Head':(transform(v[0],(w*0.23,w*0.19,w*0.28)), True),
+        'Torso':(transform(sample['body_center'],(w*0.46,sample['body_depth'],sample['body_height']*0.55),axis.to_track_quat('Z','Y')),True),
+        'Pelvis':(transform(hip,(w*0.34,w*0.2,w*0.22)),True)}
+    neck_start=shoulder+Vector((0,0,w*0.08));neck_end=v[0]-Vector((0,0,w*0.24))
+    neck=neck_end-neck_start
+    parts['Neck']=(transform((neck_start+neck_end)/2,(w*0.1,w*0.1,max(w*0.03,neck.length/2)),neck.to_track_quat('Z','Y')),True)
+    for j in (11,12):
+        anchor=shoulder+Vector((0,-sample['body_depth']*0.4,-w*0.025))
+        delta=v[j]-anchor
+        parts[f'Clavicle_{j}']=(transform((anchor+v[j])/2,(w*0.1,w*0.1,max(w*0.05,delta.length/2+w*0.025)),delta.to_track_quat('Z','Y')),True)
+    for a,b in limbs:
+        delta=v[b]-v[a]
+        valid=min(visible[str(a)],visible[str(b)])>=0.45 and delta.length>0.01
+        radius=w*(0.075 if a<23 else 0.105)
+        parts[f'Limb_{a}_{b}']=(transform((v[a]+v[b])/2,(radius,radius,max(0.01,delta.length/2+radius*0.4)),delta.to_track_quat('Z','Y') if delta.length>0.01 else None),valid)
+    for j in (11,12,13,14,15,16,23,24,25,26,27,28):
+        radius=w*(0.09 if j<23 else 0.115)
+        parts[f'Joint_{j}']=(transform(v[j],(radius,radius,radius)),visible[str(j)]>=0.45)
+    for j in (15,16):
+        parts[f'Hand_{j}']=(transform(v[j]+Vector((0,0,-w*0.04)),(w*0.09,w*0.06,w*0.13)),visible[str(j)]>=0.45)
+    for j in (27,28):
+        parts[f'Foot_{j}']=(transform(v[j]+Vector((0,-w*0.1,-w*0.05)),(w*0.1,w*0.2,w*0.075)),visible[str(j)]>=0.45)
+    return parts
+
+
+for actor in spec.get('optimized_actors', []):
+    animation=actor['animation']
+    initial=part_transforms(animation[0])
+    armature=bpy.data.armatures.new(actor['id']+'_Skeleton')
+    rig=bpy.data.objects.new(actor['id']+'_Rig',armature)
+    characters.objects.link(rig)
+    rig['source_video']=spec.get('source_path','')
+    rig['geometry_profile']='mannequin_v2'
+    rig['pose_confidence']=actor.get('confidence',0)
+    rig['depth_mode']='separate approximate depth layer; contacts need review'
+    rig.show_in_front=True
+    bpy.context.view_layer.objects.active=rig
+    rig.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    root=armature.edit_bones.new('Root');root.head=(0,0,0);root.tail=(0,0,1)
+    for name,(matrix,valid) in initial.items():
+        bone=armature.edit_bones.new(name)
+        bone.head=matrix.translation
+        direction=matrix.to_quaternion()@Vector((0,0,1))
+        bone.tail=bone.head+direction*max(0.02,matrix.to_scale().z)
+        bone.parent=root;bone.use_connect=False;bone.inherit_scale='NONE'
+    bpy.ops.object.mode_set(mode='OBJECT')
+    rig.select_set(False)
+    rest={name:armature.bones[name].matrix_local.copy() for name in initial}
+    meshes=[]
+    for name,(matrix,valid) in initial.items():
+        obj=mesh(actor['id']+'_'+name,'torso' if name=='Torso' else 'sphere')
+        for vertex in obj.data.vertices:
+            vertex.co=matrix@vertex.co
+        group=obj.vertex_groups.new(name=name)
+        group.add(list(range(len(obj.data.vertices))),1,'REPLACE')
+        modifier=obj.modifiers.new('WhiteblockSkeleton','ARMATURE');modifier.object=rig
+        meshes.append(obj)
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in meshes:obj.select_set(True)
+    bpy.context.view_layer.objects.active=meshes[0]
+    bpy.ops.object.join()
+    model=bpy.context.object;model.name=actor['id']+'_WhiteModel';model.parent=rig
+    model['source_video']=spec.get('source_path','')
+    model['geometry_profile']='mannequin_v2'
+    frames={s['frame']:s for s in animation}
+    for frame in range(scene.frame_start,scene.frame_end+1):
+        sample=frames.get(frame)
+        model.hide_render=model.hide_viewport=sample is None
+        model.keyframe_insert('hide_render',frame=frame);model.keyframe_insert('hide_viewport',frame=frame)
+        if sample is None:continue
+        for name,(matrix,valid) in part_transforms(sample).items():
+            bone=rig.pose.bones[name]
+            bone.rotation_mode='QUATERNION'
+            if not valid:
+                matrix=transform(matrix.translation,(0.00001,)*3)
+            bone.matrix=matrix@initial[name][0].inverted()@rest[name]
+            bone.keyframe_insert('location',frame=frame)
+            bone.keyframe_insert('rotation_quaternion',frame=frame)
+            bone.keyframe_insert('scale',frame=frame)
+
+for actor in spec.get('actors', []):
+    if actor.get('poses'):continue
+    bpy.ops.mesh.primitive_cube_add(location=actor.get('location',(0,0,1)),scale=actor.get('scale',(0.5,0.5,1)))
+    obj=bpy.context.object;obj.name=actor['id'];obj.data.materials.append(mat);move_to(obj,characters)
+
+for prop in spec.get('props', []):
+    bpy.ops.mesh.primitive_cube_add(location=prop.get('location', (0,0,0.5)), scale=prop.get('scale', (0.5,0.5,0.5)))
+    obj = bpy.context.object
+    obj.name = prop.get('name', 'Prop')
+    obj.data.materials.append(mat)
+    move_to(obj, collections.get('PROPS', white))
+
+# Preserve the original as a disabled reference layer in the editable .blend.
+source = spec.get('source_path')
+if source and os.path.isfile(source):
+    movie = bpy.data.images.load(source, check_existing=True)
+    movie.source = 'MOVIE'
+    background = camera.data.background_images.new()
+    background.image = movie
+    background.image_user.frame_duration = spec.get('source_frame_count', scene.frame_end)
+    background.alpha = 0.4
+    camera.data.show_background_images = False
+    scene['reference_video'] = source
+scene['reconstruction_mode'] = spec.get('reconstruction', 'manual_geometry')
+scene['limitations'] = 'Perspective camera with estimated depth; ground plane added for reference. Verify occlusion, props and background manually.'
+
+# Blender 5 uses layered actions; older versions also expose legacy fcurves.
+for obj in list(characters.objects):
+    if not obj.animation_data or not obj.animation_data.action:
+        continue
+    action = obj.animation_data.action
+    curves = list(getattr(action, 'fcurves', []))
+    for layer in getattr(action, 'layers', []):
+        for strip in layer.strips:
+            for bag in getattr(strip, 'channelbags', []):
+                curves.extend(bag.fcurves)
+    for curve in curves:
+        for k in curve.keyframe_points:
+            k.interpolation = 'CONSTANT' if curve.data_path.startswith('hide_') else 'LINEAR'
+scene.frame_set(scene.frame_start)
+if spec.get('output_blend'):
+    bpy.ops.wm.save_as_mainfile(filepath=spec['output_blend'])
+if spec.get('output_video'):
+    os.makedirs(os.path.dirname(scene.render.filepath), exist_ok=True)
+    bpy.ops.render.render(animation=True)
